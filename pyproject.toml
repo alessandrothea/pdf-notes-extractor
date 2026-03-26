@@ -1,0 +1,23 @@
+[project]
+name = "pdf-annotation-extractor"
+version = "0.1.0"
+description = "Extract annotations from PDF files and export to Markdown, plain text, Word, or PDF"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pypdf>=4.0.0",
+    "python-docx>=1.1.0",
+    "fpdf2>=2.7.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+extract-pdf-annotations = "extract_pdf_annotations:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

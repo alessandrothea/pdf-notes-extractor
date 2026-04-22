@@ -21,7 +21,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
-from rich.markdown import Markdown
+from rich.rule import Rule
 from rich import box
 
 # ── Rich console setup ─────────────────────────────────────────────────────────
@@ -413,40 +413,69 @@ def export_word(annotations: list[dict], pdf_name: str, out_path: Path) -> None:
 
 
 def print_markdown_rich(annotations: list[dict], pdf_name: str) -> None:
-    """Render annotations as rich markdown in the terminal."""
-    console.print(Markdown(
-        f"# PDF Annotations — {pdf_name}\n\n"
-        f"*Extracted: {datetime.now().strftime('%Y-%m-%d %H:%M')}*  \n"
-        f"*Total annotations: {len(annotations)}*"
-    ))
+    """Render annotations as rich output in the terminal."""
+    console.print()
+    console.print(f"[bold]{pdf_name}[/bold]")
+    console.print(f"[dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}  ·  {len(annotations)} annotation(s)[/dim]")
 
     for page, items in _group_by_page(annotations).items():
-        console.print(Markdown(f"## Page {page}"))
+        console.print()
+        console.print(Rule(f"[bold]Page {page}[/bold]", style="bright_black"))
+
         for a in items:
-            console.print(Markdown(f"### {a['type']}"))
+            outer_rows = []
 
-            # Compact one-liner: section · author · date
-            meta_parts = []
-            if a["section"]: meta_parts.append(f"[dim]§[/dim] [italic]{a['section']}[/italic]")
-            if a["author"]:  meta_parts.append(f"[bold]Author:[/bold] [bright_cyan]{a['author']}[/bright_cyan]")
-            if a["date"]:    meta_parts.append(f"[bold]Date:[/bold] [dim]{a['date']}[/dim]")
-            if meta_parts:
-                console.print("  " + "  [dim]·[/dim]  ".join(meta_parts))
+            if a["section"]:
+                outer_rows.append(Text.from_markup(
+                    f"[dim]§[/dim] [italic]{a['section']}[/italic]"
+                ))
 
-            if a["subject"]: console.print(Markdown(f"- **Subject:** {a['subject']}"))
-
-            # Marked text, highlighted with the annotation color if available
             if a["marked_text"]:
                 if a["color"]:
-                    console.print(f"  [on {a['color']}]{a['marked_text']}[/on {a['color']}]")
+                    outer_rows.append(Text.from_markup(
+                        f"[on {a['color']}]{a['marked_text']}[/on {a['color']}]"
+                    ))
                 else:
-                    console.print(Markdown(f"> {a['marked_text']}"))
+                    outer_rows.append(Text.from_markup(f"[italic]{a['marked_text']}[/italic]"))
 
-            # Comment
-            if a["content"]:
-                quoted = a["content"].replace("\n", "\n  > ")
-                console.print(Markdown(f"- **Comment:**\n\n  > {quoted}"))
+            has_inner = a["subject"] or a["content"]
+            if has_inner:
+                inner = Table(show_header=False, padding=(0, 0), expand=True)
+                inner.add_column("label", no_wrap=True, max_width=20)
+                inner.add_column("value", overflow="fold")
+                inner_rows = []
+                if a["subject"]:
+                    inner_rows.append(("[dim]Subject[/dim]", a["subject"]))
+                if a["content"]:
+                    lbl_parts = []
+                    if a["author"]: lbl_parts.append(f"[bold bright_cyan]{a['author']}[/bold bright_cyan]")
+                    if a["date"]:   lbl_parts.append(f"[dim]{a['date']}[/dim]")
+                    inner_rows.append(("[dim]Comment[/dim]", a["content"]))
+                for i, (lbl, val) in enumerate(inner_rows):
+                    inner.add_row(lbl, val, end_section=(i < len(inner_rows) - 1))
+                outer_rows.append(inner)
 
+            if not outer_rows:
+                continue
+
+            outer = Table(box=box.MINIMAL, show_header=False, padding=(0, 0), expand=True)
+            outer.add_column("content", overflow="fold")
+            for i, r in enumerate(outer_rows):
+                # outer.add_row(r, end_section=(i < len(outer_rows) - 1))
+                outer.add_row(r)
+
+            title_parts = [f"[bold]{a['type']}[/bold]"]
+            if a["author"]: title_parts.append(f"[bright_cyan]{a['author']}[/bright_cyan]")
+            if a["date"]:   title_parts.append(f"[dim]{a['date']}[/dim]")
+
+            console.print(Panel(
+                outer,
+                title="  [dim]·[/dim]  ".join(title_parts),
+                title_align="left",
+                border_style="bright_black",
+                expand=False,
+                padding=(0, 0),
+            ))
             console.print()
 
 

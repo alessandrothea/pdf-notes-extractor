@@ -77,61 +77,6 @@ ANNOTATION_TYPES = {
 
 # ── Core extractor ─────────────────────────────────────────────────────────────
 
-def _extract_quad_text(page, quad_points) -> str:
-    """Extract the text covered by QuadPoints on a page."""
-    try:
-        quads = [quad_points[i:i+8] for i in range(0, len(quad_points), 8)]
-        regions = []
-        for quad in quads:
-            xs = [float(quad[i]) for i in range(0, 8, 2)]
-            ys = [float(quad[i]) for i in range(1, 8, 2)]
-            # small tolerance for floating-point mismatches
-            regions.append((min(xs) - 1, min(ys) - 1, max(xs) + 1, max(ys) + 1))
-
-        parts: list[str] = []
-
-        def visitor(*args):
-            text, cm, tm = args[0], args[1], args[2]
-            if not text or not text.strip():
-                return
-            # Combine graphics-state matrix (cm) with text matrix (tm)
-            # to get actual page coordinates.
-            x = cm[0] * tm[4] + cm[2] * tm[5] + cm[4]
-            y = cm[1] * tm[4] + cm[3] * tm[5] + cm[5]
-            for x0, y0, x1, y1 in regions:
-                if x0 <= x <= x1 and y0 <= y <= y1:
-                    parts.append(text)
-                    break
-
-        page.extract_text(visitor_text=visitor)
-        return "".join(parts).strip()
-    except Exception:
-        return ""
-
-
-def _build_section_map(reader) -> list[tuple[int, str]]:
-    """Return a sorted list of (1-based page number, section title) from the PDF outline."""
-    sections: list[tuple[int, str]] = []
-
-    def traverse(outline):
-        for item in outline:
-            if isinstance(item, list):
-                traverse(item)
-            else:
-                try:
-                    page_num = reader.get_destination_page_number(item) + 1
-                    sections.append((page_num, item.title))
-                except Exception:
-                    pass
-
-    try:
-        traverse(reader.outline)
-    except Exception:
-        pass
-
-    return sorted(sections)
-
-
 def _section_for_page(sections: list[tuple[int, str]], page: int) -> str:
     """Return the title of the last section that starts on or before the given page."""
     result = ""
@@ -146,55 +91,56 @@ def _section_for_page(sections: list[tuple[int, str]], page: int) -> str:
 def extract_annotations(pdf_path: Path) -> list[dict]:
     """Extract all annotations from a PDF, page by page."""
     try:
-        from pypdf import PdfReader
+        import pymupdf
     except ImportError:
-        raise click.ClickException("pypdf is required.  Run:  pip install pypdf")
+        raise click.ClickException("pymupdf is required.  Run:  pip install pymupdf")
 
-    reader = PdfReader(str(pdf_path))
-    sections = _build_section_map(reader)
+    doc = pymupdf.open(str(pdf_path))
+
+    sections: list[tuple[int, str]] = sorted(
+        (entry[2], entry[1]) for entry in doc.get_toc()
+    )
+
+    SKIP = {"Link", "Widget", "Popup", "PrinterMark", "TrapNet"}
     annotations = []
 
-    for page_num, page in enumerate(reader.pages, start=1):
-        if "/Annots" not in page:
-            continue
-
-        for annot_ref in page["/Annots"]:
-            try:
-                annot = annot_ref.get_object()
-            except Exception:
+    for page in doc:
+        page_num = page.number + 1
+        for annot in page.annots():
+            type_name = annot.type[1]
+            if type_name in SKIP:
                 continue
 
-            subtype = annot.get("/Subtype", "")
-            # Skip invisible / structural annotations
-            if subtype in ("/Link", "/Widget", "/Popup", "/PrinterMark", "/TrapNet"):
-                continue
-
-            content = annot.get("/Contents", "").strip() if annot.get("/Contents") else ""
-            author  = annot.get("/T", "").strip()        if annot.get("/T")         else ""
-            subject = annot.get("/Subj", "").strip()     if annot.get("/Subj")      else ""
+            info    = annot.info
+            content = info.get("content", "").strip()
+            author  = info.get("title",   "").strip()
+            subject = info.get("subject", "").strip()
 
             marked_text = ""
-            if "/QuadPoints" in annot:
-                marked_text = _extract_quad_text(page, annot["/QuadPoints"])
-
-            raw_date = annot.get("/M", "")
-            date_str = _parse_pdf_date(str(raw_date)) if raw_date else ""
+            vertices = annot.vertices
+            if vertices:
+                parts = []
+                for i in range(0, len(vertices), 4):
+                    rect = pymupdf.Quad(vertices[i:i+4]).rect + (-1, -1, 1, 1)
+                    text = page.get_text(clip=rect).strip()
+                    if text:
+                        parts.append(text)
+                marked_text = " ".join(parts)
 
             color_str = ""
-            if "/C" in annot:
-                try:
-                    c = annot["/C"]
-                    if len(c) == 3:
-                        color_str = "#{:02X}{:02X}{:02X}".format(
-                            int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)
-                        )
-                except Exception:
-                    pass
+            rgb = annot.colors.get("stroke") or annot.colors.get("fill")
+            if rgb:
+                color_str = "#{:02X}{:02X}{:02X}".format(
+                    int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+                )
+
+            raw_date = info.get("modDate") or info.get("creationDate") or ""
+            date_str = _parse_pdf_date(raw_date) if raw_date else ""
 
             annotations.append({
                 "page":        page_num,
                 "section":     _section_for_page(sections, page_num),
-                "type":        ANNOTATION_TYPES.get(str(subtype), str(subtype).lstrip("/")),
+                "type":        ANNOTATION_TYPES.get(f"/{type_name}", type_name),
                 "author":      author,
                 "date":        date_str,
                 "subject":     subject,
@@ -649,26 +595,26 @@ def export_pdf(annotations: list[dict], pdf_name: str, out_path: Path) -> None:
                 if author_date:
                     row = table.row()
                     row.cell(author_date, colspan=2,
-                             style=FontFace(font_family=body_font, font_style="B", font_size_pt=9))
+                             style=FontFace(family=body_font, emphasis="B", size_pt=9))
 
                 if a["subject"]:
                     row = table.row()
-                    row.cell("Subject",   style=FontFace(font_family=body_font, font_style="B",
-                                                         font_size_pt=9, fill_color=GREY))
-                    row.cell(a["subject"], style=FontFace(font_family=body_font, font_size_pt=9))
+                    row.cell("Subject",   style=FontFace(family=body_font, emphasis="B",
+                                                         size_pt=9, fill_color=GREY))
+                    row.cell(a["subject"], style=FontFace(family=body_font, size_pt=9))
 
                 if a["marked_text"]:
                     fill = hex_rgb(a["color"]) if a["color"] else None
                     row = table.row()
-                    style = FontFace(font_family=body_font, font_size_pt=9,
+                    style = FontFace(family=body_font, size_pt=9,
                                      fill_color=fill if fill else (255, 255, 255))
                     row.cell(a["marked_text"], colspan=2, style=style)
 
                 if a["content"]:
                     row = table.row()
-                    row.cell("Comment",    style=FontFace(font_family=body_font, font_style="B",
-                                                          font_size_pt=9, fill_color=GREY))
-                    row.cell(a["content"], style=FontFace(font_family=body_font, font_size_pt=9))
+                    row.cell("Comment",    style=FontFace(family=body_font, emphasis="B",
+                                                          size_pt=9, fill_color=GREY))
+                    row.cell(a["content"], style=FontFace(family=body_font, size_pt=9))
 
     pdf.output(str(out_path))
     console.print(f"  [success]✓[/success]  PDF        [dim]→[/dim] [path]{out_path}[/path]")
